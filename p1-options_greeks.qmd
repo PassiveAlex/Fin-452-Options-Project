@@ -103,8 +103,7 @@ Create plots showing each Greek vs. futures price over F ∈ \[50, 100\], with o
 ```{r q1}
 # Step sizing
 delta_step <- 0.01 # Minimum change in price on CL contract (As per CME CL contract specs)
-gamma_step <- 0.01 # Minimum change in delta
-vega_step <- 0.001
+vega_step <- 0.01 # 1% change in implied vol
 theta_step <- 1/365 # 1 day (in years), 
 
 # Stationary Greeks (Central Difference Method)
@@ -127,277 +126,305 @@ get_cd_greeks <- function(X, T2M, r, b = 0, sigma, type, step, range = c(50, 100
                   gamma = purrr::map_dbl(option, ~.x$gamma),
                   vega = purrr::map_dbl(option, ~.x$vega) / 100,
                   theta = purrr::map_dbl(option, ~.x$theta) / 365,
-                  rho = purrr::map_dbl(option, ~.x$rho),
                   price = purrr::map_dbl(option, ~.x$price)) %>%
     dplyr::select(-option)
   
   return(output_df)
 }
-
-## Delta
-
-P1_d_down <- RTL::GBSOption(F_0 - delta_step, port$K[1], port$T2M[1], r, 0, port$sigma[1], port$type[1])$price
-P1_d_up <- RTL::GBSOption(F_0 + delta_step, port$K[1], port$T2M[1], r, 0, port$sigma[1], port$type[1])$price
-
-P1_d_num <- (P1_d_up - P1_d_down) / (2 * delta_step) 
-# --------------------------------------------------
-P2_d_down <- RTL::GBSOption(F_0 - delta_step, port$K[2], port$T2M[2], r, 0, port$sigma[2], port$type[2])$price
-P2_d_up <- RTL::GBSOption(F_0 + delta_step, port$K[2], port$T2M[2], r, 0, port$sigma[2], port$type[2])$price
-
-P2_d_num <- (P2_d_up - P2_d_down) / (2 * delta_step)
-# --------------------------------------------------
-P3_d_down <- RTL::GBSOption(F_0 - delta_step, port$K[3], port$T2M[3], r, 0, port$sigma[3], port$type[3])$price
-P3_d_up <- RTL::GBSOption(F_0 + delta_step, port$K[3], port$T2M[3], r, 0, port$sigma[3], port$type[3])$price
+# -------------------------------------------------------------------------------------------------------
+position_greeks <- function(F_0, X, T2M, r, b = 0, sigma, step_F, step_S, step_T, type){
+  # Gets the greeks at whatever the current Spot price is, given by F_0
+  # Gotta run ts in another function to get portfolio greeks and shit
+  # F_0: Spot
+  # X: strike
+  # T2M: time 2 maturity
+  # r: rf rate
+  # b: cost of carry
+  # sigma: implied vol
+  # step_F: step size for the spot
+  # step_S: step size for vol
+  # step_T: step size in time
+  # type; call or put buster
   
-P3_d_num <- (P3_d_up - P3_d_down) / (2 * delta_step)
+  # Price at current spot
+  current_price <- RTL::GBSOption(F_0, X, T2M, r, b, sigma, type)$price
+  
+  # Delta central diff
+  price_up <- RTL::GBSOption(F_0 + step_F, X, T2M, r, b, sigma, type)$price
+  price_down <- RTL::GBSOption(F_0 - step_F, X, T2M, r, b, sigma, type)$price
+  
+  delta <- (price_up - price_down) / (2 * step_F)
 
-## Gamma
+  # Gamma central diffe
+  gamma <- (price_up - 2 * current_price + price_down) / (step_F ^ 2)
+  
+  # Vega - Vol up and down
+  price_vol_up <- RTL::GBSOption(F_0, X, T2M, r, b, sigma + step_S, type)$price
+  price_vol_down <- RTL::GBSOption(F_0, X, T2M, r, b, sigma - step_S, type)$price
+  
+  vega <- (price_vol_up - price_vol_down) / (2 * step_S)
+  
+  # Theta - Time forward :P
+  price_t_up <- RTL::GBSOption(F_0, X, T2M - step_T, r, b, sigma, type)$price
+  
+  theta <- (price_t_up - current_price) / step_T
+  
+  # Vanna
+  price_up_up <- RTL::GBSOption(F_0 + step_F, X, T2M, r, b, sigma + step_S, type)$price
+  price_up_dn <- RTL::GBSOption(F_0 + step_F, X, T2M, r, b, sigma - step_S, type)$price
+  price_dn_up <- RTL::GBSOption(F_0 - step_F, X, T2M, r, b, sigma + step_S, type)$price
+  price_dn_dn <- RTL::GBSOption(F_0 - step_F, X, T2M, r, b, sigma - step_S, type)$price
+  
+  vanna <- (price_up_up - price_up_dn - price_dn_up + price_dn_dn) / (4 * step_F * step_S)
+  
+  
+  
+  price <- current_price # renaming this before putting it in the list, keep it pretty
+  
+  # Output list (KEEP THIS IN THE SAME ORDER OR THERE WILL BE CONSEQUENCES BRUH)
+  greeks <- list(delta, gamma, vega, theta, vanna, price)
+  
+  return(greeks)
+  
+}
 
-P1_g_down <- RTL::GBSOption(F_0 - gamma_step, port$K[1], port$T2M[1], r, 0, port$sigma[1], port$type[1])$price
-P1_g_curr <- RTL::GBSOption(F_0, port$K[1], port$T2M[1], r, 0, port$sigma[1], port$type[1])$price
-P1_g_up <- RTL::GBSOption(F_0 + gamma_step, port$K[1], port$T2M[1], r, 0, port$sigma[1], port$type[1])$price
+portfolio_greeks <- function(portfolio, F_0, r, b = 0, step_F, step_S, step_T, range = c(50, 100)) {
+  # Gets the greeks for all the possible combinations of underlying spot price
+  
+  # Number of contracts for each of the positions, keeps code below clearer
+  P1_n <- portfolio$n[1]
+  P2_n <- portfolio$n[2]
+  P3_n <- portfolio$n[3]
+  
+  # Spine of the df, just has the spot value in range
+  input_df <- data.frame(S = seq(range[1], range[2], by = step_F))
+  
+  # Grabs the list of all the greeks for the positions
+  greeks_lists <- input_df %>%
+    rowwise() %>%
+    dplyr::mutate(P1_greeks = list(mapply(position_greeks, S, portfolio$K[1], portfolio$T2M[1], r, 0, portfolio$sigma[1], step_F, step_S, step_T, portfolio$type[1])),
+                  P2_greeks = list(mapply(position_greeks, S, portfolio$K[2], portfolio$T2M[2], r, 0, portfolio$sigma[2], step_F, step_S, step_T, portfolio$type[2])),
+                  P3_greeks = list(mapply(position_greeks, S, portfolio$K[3], portfolio$T2M[3], r, 0, portfolio$sigma[3], step_F, step_S, step_T, portfolio$type[3])))
+  
+  
+  # This shit gets ugly here, im sorry phil, i couldnt think of any other way to do this part lol 
+  # The columns with n are weighted to be total greek for each position,
+  greeks_broken <- greeks_lists %>%
+    dplyr::mutate(
+      # Delta B-)
+      P1_delta = P1_greeks[[1]],
+      P1_delta_n = P1_delta * P1_n,
+      P2_delta = P2_greeks[[1]],
+      P2_delta_n = P2_delta * P2_n,
+      P3_delta = P3_greeks[[1]],
+      P3_delta_n = P3_delta * P3_n,
+      
+      # Gamma !!!!!
+      P1_gamma = P1_greeks[[2]],
+      P1_gamma_n = P1_gamma * P1_n,
+      P2_gamma = P2_greeks[[2]],
+      P2_gamma_n = P2_gamma * P2_n,
+      P3_gamma = P3_greeks[[2]],
+      P3_gamma_n = P3_gamma * P3_n,
+      
+      # Vega(s) O.O
+      P1_vega = P1_greeks[[3]],
+      P1_vega_n = P1_vega * P1_n,
+      P2_vega = P2_greeks[[3]],
+      P2_vega_n = P2_vega * P2_n,
+      P3_vega = P3_greeks[[3]],
+      P3_vega_n = P3_vega * P3_n,
+      
+      # Theta 
+      P1_theta = P1_greeks[[4]],
+      P1_theta_n = P1_theta * P1_n,
+      P2_theta = P2_greeks[[4]],
+      P2_theta_n = P2_theta * P2_n,
+      P3_theta = P3_greeks[[4]],
+      P3_theta_n = P3_theta * P3_n,
+      
+      # (Ha)Vanna
+      P1_vanna = P1_greeks[[5]],
+      P1_vanna_n = P1_vanna * P1_n,
+      P2_vanna = P2_greeks[[5]],
+      P2_vanna_n = P2_vanna * P2_n,
+      P3_vanna = P3_greeks[[5]],
+      P3_vanna_n = P3_vanna * P3_n,
+      
+      # Price
+      P1_price = P1_greeks[[6]],
+      P1_price_n = P1_price * P1_n,
+      P2_price = P2_greeks[[6]],
+      P2_price_n = P2_price * P1_n,
+      P3_price = P3_greeks[[6]],
+      P3_price_n = P3_price * P3_n,
+      
+      # Portfolio shit
+      Port_delta_n = P1_delta_n + P2_delta_n + P3_delta_n,
+      Port_gamma_n = P1_gamma_n + P2_gamma_n + P3_gamma_n,
+      Port_vega_n = P1_vega_n + P2_vega_n + P3_vega_n,
+      Port_theta_n = P1_theta_n + P2_theta_n + P3_theta_n,
+      Port_vanna_n = P1_vanna_n + P2_vanna_n + P3_vanna_n,
+      Port_price_n = P1_price_n + P2_price_n + P3_price_n
+    ) %>%
+    dplyr::select(-c(P1_greeks, P2_greeks, P3_greeks))
+  
+  return(greeks_broken)
+  
+}
 
-P1_g_num <- (P1_g_up - 2 * P1_g_curr + P1_g_down) / (gamma_step ^ 2)
-# ------------------------------------------------------------------
+portfolio <- portfolio_greeks(port, F_0, r, 0, delta_step, vega_step, theta_step)
 
-P2_g_down <- RTL::GBSOption(F_0 - gamma_step, port$K[2], port$T2M[2], r, 0, port$sigma[2], port$type[2])$price
-P2_g_curr <- RTL::GBSOption(F_0, port$K[2], port$T2M[2], r, 0, port$sigma[2], port$type[2])$price
-P2_g_up <- RTL::GBSOption(F_0 + gamma_step, port$K[2], port$T2M[2], r, 0, port$sigma[2], port$type[2])$price
+# Create plots showing each Greek vs. futures price over F ∈ [50, 100], with one line per position.
 
-P2_g_num <- (P2_g_up - 2 * P2_g_curr + P2_g_down) / (gamma_step ^ 2)
-# ------------------------------------------------------------------
+delta_plot <- plotly::plot_ly(data = portfolio) %>%
+  add_trace(
+    x = ~ S,
+    y = ~ P1_delta_n,
+    type = "scatter",
+    mode = "lines",
+    name = "P1 Delta"
+  ) %>%
+  add_trace(
+    x = ~ S,
+    y = ~ P2_delta_n,
+    type = "scatter",
+    mode = "lines",
+    name = "P2 Delta"
+  ) %>%
+  add_trace(
+    x = ~ S,
+    y = ~ P3_delta_n,
+    type = "scatter",
+    mode = "lines",
+    name = "P3 Delta"
+  ) %>%
+  add_trace(
+    x = ~ S,
+    y = ~ Port_delta_n,
+    type = "scatter",
+    mode = "lines",
+    name = "Portfolio Delta"
+  ) %>%
+  layout(
+    title = list(text = "Delta vs Futures Price."),
+    xaxis = list(title = "Futures Price"),
+    yaxis = list(title = "Delta, weighted")
+  )
 
-P3_g_down <- RTL::GBSOption(F_0 - gamma_step, port$K[3], port$T2M[3], r, 0, port$sigma[3], port$type[3])$price
-P3_g_curr <- RTL::GBSOption(F_0, port$K[3], port$T2M[3], r, 0, port$sigma[3], port$type[3])$price
-P3_g_up <- RTL::GBSOption(F_0 + gamma_step, port$K[3], port$T2M[3], r, 0, port$sigma[3], port$type[3])$price
+gamma_plot <- plotly::plot_ly(data = portfolio) %>%
+  add_trace(
+    x = ~ S,
+    y = ~ P1_gamma_n,
+    type = "scatter",
+    mode = "lines",
+    name = "P1 Gamma"
+  ) %>%
+  add_trace(
+    x = ~ S,
+    y = ~ P2_gamma_n,
+    type = "scatter",
+    mode = "lines",
+    name = "P2 Gamma"
+  ) %>%
+  add_trace(
+    x = ~ S,
+    y = ~ P3_gamma_n,
+    type = "scatter",
+    mode = "lines",
+    name = "P3 Gamma"
+  ) %>%
+  add_trace(
+    x = ~ S,
+    y = ~ Port_gamma_n,
+    type = "scatter",
+    mode = "lines",
+    name = "Portfolio Gamma"
+  ) %>%
+  layout(
+    title = list(text = "Gamma vs Futures Price."),
+    xaxis = list(title = "Futures Price"),
+    yaxis = list(title = "Gamma, weighted")
+  )
 
-P3_g_num <- (P3_g_up - 2 * P3_g_curr + P3_g_down) / (gamma_step ^ 2)
+vega_plot <- plotly::plot_ly(data = portfolio) %>%
+  add_trace(
+    x = ~ S,
+    y = ~ P1_vega_n,
+    type = "scatter",
+    mode = "lines",
+    name = "P1 Vega"
+  ) %>%
+  add_trace(
+    x = ~ S,
+    y = ~ P2_vega_n,
+    type = "scatter",
+    mode = "lines",
+    name = "P2 Vega"
+  ) %>%
+  add_trace(
+    x = ~ S,
+    y = ~ P3_vega_n,
+    type = "scatter",
+    mode = "lines",
+    name = "P3 Vega"
+  ) %>%
+  add_trace(
+    x = ~ S,
+    y = ~ Port_vega_n,
+    type = "scatter",
+    mode = "lines",
+    name = "Portfolio Vega"
+  ) %>%
+  layout(
+    title = list(text = "Vega vs Futures Price."),
+    xaxis = list(title = "Futures Price"),
+    yaxis = list(title = "Vega, weighted")
+  )
 
-## Vega
+theta_plot <- plotly::plot_ly(data = portfolio) %>%
+  add_trace(
+    x = ~ S,
+    y = ~ P1_theta_n,
+    type = "scatter",
+    mode = "lines",
+    name = "P1 Theta"
+  ) %>%
+  add_trace(
+    x = ~ S,
+    y = ~ P2_theta_n,
+    type = "scatter",
+    mode = "lines",
+    name = "P2 Theta"
+  ) %>%
+  add_trace(
+    x = ~ S,
+    y = ~ P3_theta_n,
+    type = "scatter",
+    mode = "lines",
+    name = "P3 Theta"
+  ) %>%
+  add_trace(
+    x = ~ S,
+    y = ~ Port_theta_n,
+    type = "scatter",
+    mode = "lines",
+    name = "Portfolio theta"
+  ) %>%
+  layout(
+    title = list(text = "Theta vs Futures Price."),
+    xaxis = list(title = "Futures Price"),
+    yaxis = list(title = "Theta, weighted")
+  )
 
-P1_v_down <- RTL::GBSOption(F_0, port$K[1], port$T2M[1], r, 0, port$sigma[1] - vega_step, port$type[1])$price
-P1_v_up <- RTL::GBSOption(F_0, port$K[1], port$T2M[1], r, 0, port$sigma[1] + vega_step, port$type[1])$price
-
-P1_v_num <- (P1_v_up - P1_v_down) / (2 * vega_step * 100)
-# -------------------------------------------------
-
-P2_v_down <- RTL::GBSOption(F_0, port$K[2], port$T2M[2], r, 0, port$sigma[2] - vega_step, port$type[2])$price
-P2_v_up <- RTL::GBSOption(F_0, port$K[2], port$T2M[2], r, 0, port$sigma[2] + vega_step, port$type[2])$price
-
-P2_v_num <- (P2_v_up - P2_v_down) / (2 * vega_step * 100)
-# -------------------------------------------------
-
-P3_v_down <- RTL::GBSOption(F_0, port$K[3], port$T2M[3], r, 0, port$sigma[3] - vega_step, port$type[3])$price
-P3_v_up <- RTL::GBSOption(F_0, port$K[3], port$T2M[3], r, 0, port$sigma[3] + vega_step, port$type[3])$price
-
-P3_v_num <- (P3_v_up - P3_v_down) / (2 * vega_step * 100)
-
-## Theta
-
-P1_t_up <- RTL::GBSOption(F_0, port$K[1], port$T2M[1] - theta_step, r, 0, port$sigma[1], port$type[1])$price
-P1_t_curr <- RTL::GBSOption(F_0, port$K[1], port$T2M[1], r, 0, port$sigma[1], port$type[1])$price
-
-P1_t_num <- P1_t_up - P1_t_curr
-# -----------------------------
-
-P2_t_up <- RTL::GBSOption(F_0, port$K[2], port$T2M[2] - theta_step, r, 0, port$sigma[2], port$type[2])$price
-P2_t_curr <- RTL::GBSOption(F_0, port$K[2], port$T2M[2], r, 0, port$sigma[2], port$type[2])$price
-
-P2_t_num <- P2_t_up - P2_t_curr
-# -----------------------------
-
-P3_t_up <- RTL::GBSOption(F_0, port$K[3], port$T2M[3] - theta_step, r, 0, port$sigma[3], port$type[3])$price
-P3_t_curr <- RTL::GBSOption(F_0, port$K[3], port$T2M[3], r, 0, port$sigma[3], port$type[3])$price
-
-P3_t_num <- P3_t_up - P3_t_curr
-# -----------------------------
+delta_plot
+gamma_plot
+vega_plot
+theta_plot
 
 # Ouput table for the stationary greeks
 
-a <- dplyr::tribble(
-  ~Position, ~Type, ~Delta, ~Gamma, ~Vega, ~Theta,
-  "P1", port$type[1], P1_d_num, P1_g_num, P1_v_num, P1_t_num,
-  "P2", port$type[2], P2_d_num, P2_g_num, P2_v_num, P2_t_num,
-  "P3", port$type[3], P3_d_num, P3_g_num, P3_v_num, P3_t_num,
-) %>%
-  gt::gt() %>%
-  gt::tab_header(title = "WTI Option basket - Stationary Greeks")
 
-
-# Graphing the greeks
-
-# gets the greeks for each position
-P1_greeks <- get_cd_greeks(port$K[1], port$T2M[1], r, 0, port$sigma[1], type = port$type[1], step = delta_step, range = c(50, 100)) %>%
-  dplyr::rename_with(~ paste0(.x, "_p1"), c(delta, gamma, vega, theta, rho, price))
-P2_greeks <- get_cd_greeks(port$K[2], port$T2M[2], r, 0, port$sigma[2], type = port$type[2], step = delta_step, range = c(50, 100)) %>%
-  dplyr::rename_with(~ paste0(.x, "_p2"), c(delta, gamma, vega, theta, rho, price))
-P3_greeks <- get_cd_greeks(port$K[3], port$T2M[3], r, 0, port$sigma[3], type = port$type[3], step = delta_step, range = c(50, 100)) %>%
-  dplyr::rename_with(~ paste0(.x, "_p3"), c(delta, gamma, vega, theta, rho, price))
-
-# chucks them all in 1 df and sorts it so its more readable
-greeks_full_table <- P1_greeks %>%
-  dplyr::left_join(., P2_greeks, join_by(S)) %>%
-  dplyr::left_join(., P3_greeks, join_by(S)) %>%
-  dplyr::select(S, contains("delta"), contains("gamma"), contains("vega"), contains("theta"), contains("rho"), contains("price"))
-
-delta_plots <- plotly::plot_ly(data = greeks_full_table) %>%
-  add_trace(x = ~ S,
-            y = ~ delta_p1,
-            type = "scatter",
-            mode = "lines",
-            name = "P1 Delta") %>%
-  add_trace(x = ~ S,
-            y = ~ delta_p2,
-            type = "scatter",
-            mode = "lines",
-            name = "P2 Delta") %>%
-  add_trace(x = ~ S,
-            y = ~ delta_p3,
-            type = "scatter",
-            mode = "lines",
-            name = "P3 Delta") %>%
-  layout(
-    title = list(text = paste0("Position Delta - Step size ", {delta_step})),
-    xaxis = list(title = paste0("Futures Price, S")),
-    yaxis = list(title = paste0("Delta"))
-  )
-
-gamma_plots <- plotly::plot_ly(data = greeks_full_table) %>%
-  add_trace(x = ~ S,
-            y = ~ gamma_p1,
-            type = "scatter",
-            mode = "lines",
-            name = "P1 Gamma") %>%
-  add_trace(x = ~ S,
-            y = ~ gamma_p2,
-            type = "scatter",
-            mode = "lines",
-            name = "P2 Gamma") %>%
-  add_trace(x = ~ S,
-            y = ~ gamma_p3,
-            type = "scatter",
-            mode = "lines",
-            name = "P3 Gamma") %>%
-  layout(
-    title = list(text = paste0("Position Gamma - Step size ", {gamma_step})),
-    xaxis = list(title = paste0("Futures Price, S")),
-    yaxis = list(title = paste0("Gamma")))
-
-vega_plots <- plotly::plot_ly(data = greeks_full_table) %>%
-  add_trace(x = ~ S,
-            y = ~ vega_p1,
-            type = "scatter",
-            mode = "lines",
-            name = "P1 Vega") %>%
-  add_trace(x = ~ S,
-            y = ~ vega_p2,
-            type = "scatter",
-            mode = "lines",
-            name = "P2 Vega") %>%
-  add_trace(x = ~ S,
-            y = ~ vega_p3,
-            type = "scatter",
-            mode = "lines",
-            name = "P3 Vega") %>%
-  layout(
-    title = list(text = paste0("Position Vega - Step size ", {vega_step})),
-    xaxis = list(title = paste0("Futures Price, S")),
-    yaxis = list(title = paste0("Vega")))
-
-theta_plots <- plotly::plot_ly(data = greeks_full_table) %>%
-  add_trace(x = ~ S,
-            y = ~ theta_p1,
-            type = "scatter",
-            mode = "lines",
-            name = "P1 Theta") %>%
-  add_trace(x = ~ S,
-            y = ~ theta_p2,
-            type = "scatter",
-            mode = "lines",
-            name = "P2 Theta") %>%
-  add_trace(x = ~ S,
-            y = ~ theta_p3,
-            type = "scatter",
-            mode = "lines",
-            name = "P3 Theta") %>%
-  layout(
-    title = list(text = paste0("Position Theta - Step size 1 day")),
-    xaxis = list(title = paste0("Futures Price, S")),
-    yaxis = list(title = paste0("Theta")))
-
-# This the master plot :D
-greek_plots <- subplot(
-  delta_plots, gamma_plots,
-  vega_plots, theta_plots,
-  nrows = 2
-)
-
-# ---------------------------------------------------------
-
-# Portfolio MTM
-
-# Entire portfolio greeks - Didn't weight because they're all 2,000 contracts in a direction so fuck it i guess
-portfolio_greeks <- greeks_full_table %>%
-  dplyr::mutate(P_delta = (port$n[1] * delta_p1) + (port$n[2] * delta_p2) + (port$n[3] * delta_p3),
-                P_gamma = (port$n[1] * gamma_p1) + (port$n[2] * gamma_p2) + (port$n[3] * gamma_p3),
-                P_vega = (port$n[1] * vega_p1) + (port$n[2] * vega_p2) + (port$n[3] * vega_p3),
-                P_theta = (port$n[1] * theta_p1) + (port$n[2] * theta_p2) + (port$n[3] * theta_p3),
-                P_Price = (port$n[1] * price_p1) + (port$n[2] * price_p2) + (port$n[3] * price_p3)) %>%
-  dplyr::select(S, contains("P", ignore.case = FALSE)) # Cheeky select using ignore.case = False for the first time in my life
-
-pnl <- portfolio_greeks %>%
-  dplyr::mutate(delta_pnl = mult * P_delta,
-                gamma_pnl = mult * P_gamma * 0.5 * gamma_step ^ 2,
-                vega_pnl = mult * P_vega,
-                theta_pnl = mult * P_theta,
-                total_pnl = mult * P_Price)
-
-# Portfolio Gamma, Highs and lows
-plotly::plot_ly(data = greeks_full_table) %>%
-  add_trace(x = ~ S,
-            y = ~ (gamma_p1 - gamma_p2 - gamma_p3),
-            type = "scatter",
-            mode = "lines")
-
-
-portfolio_gamma_plot <- plotly::plot_ly(data = pnl) %>%
-  add_trace(x = ~ S,
-            y = ~ P_gamma, 
-            type = "scatter",
-            mode = "lines",
-            name = "Portfolio Gamma") %>%
-  layout(title = list(text = "Portfolio Gamma"),
-         xaxis = list(title = "Futures price, S"),
-         yaxis = list(title = "Gamma"))
-
-# Max and min portfolio gamma, and thier corresponding S
-max_port_gamma <- pnl %>%
-  dplyr::filter(P_gamma == max(P_gamma)) %>%
-  dplyr::select(S, P_gamma)
-
-min_port_gamma <- pnl %>%
-  dplyr::filter(P_gamma == min(P_gamma)) %>%
-  dplyr::select(S, P_gamma)
-# ------------------------------------------------------
-
-# Making a little table for our max and min gamma values
-dplyr::tribble(~Side, ~S, ~Gamma,
-               "Minimum", min_port_gamma[1], min_port_gamma[2],
-               "Maximum", max_port_gamma[1], max_port_gamma[2]) %>%
-  gt::gt() %>%
-  gt::tab_header(title = "Max and min gamma, across S of $50 - $100")
-# ------------------------------------------------------
-
-pnl_plot <- plotly::plot_ly(data = pnl) %>%
-  add_trace(
-    x = ~ S,
-    y = ~ total_pnl,
-    type = "scatter",
-    mode = "lines",
-    name = "PNL"
-  ) %>%
-  layout(title = list(text = "Mark to market value"),
-         xaxis = list())
 ```
 
 # Question 2 (3 points)
@@ -440,6 +467,17 @@ with h = `step_S` and k = `step_v`. The Vanna P&L contribution is Vanna × ΔF �
 Present all results in a `gt::gt()` table. Which position dominates the loss? Is the Greek attribution a reliable approximation here, and why or why not?
 
 ```{r q3}
+# Changes
+F_1 <- 90.00
+delta_F <- F_1 - F_0
+delta_sigma <- 0.2
+delta_t <- 1/365
+
+# 
+
+```
+
+```{r q3}
 # Basically repeating everything above, just using different names and values for everything :)
 
 # Some statics for the jump
@@ -448,18 +486,18 @@ delta_F <- F_1 - F_0
 vol_jump <- 0.2
 delta_t <- 1/365
 
-# 
+# Redoing shit after the jump, adding in shifts in everythign to the port df
 port_jump <- port %>%
   dplyr::mutate(sigma = sigma + vol_jump,
                 T2M = T2M - delta_t)
 
 # Grabbing the greens again, but with the change. 
-P1_greeks_jump <- get_cd_greeks(port_jump$K[1], port_jump$T2M[1], r, 0, port_jump$sigma[1], type = port_jump$type[1], step = delta_step, range = c(0, 100)) %>%
-  dplyr::rename_with(~ paste0(.x, "_p1"), c(delta, gamma, vega, theta, rho, price))
-P2_greeks_jump <- get_cd_greeks(port_jump$K[2], port_jump$T2M[2], r, 0, port_jump$sigma[2], type = port_jump$type[2], step = delta_step, range = c(0, 100)) %>%
-  dplyr::rename_with(~ paste0(.x, "_p2"), c(delta, gamma, vega, theta, rho, price))
-P3_greeks_jump <- get_cd_greeks(port_jump$K[3], port_jump$T2M[3], r, 0, port_jump$sigma[3], type = port_jump$type[3], step = delta_step, range = c(0, 100)) %>%
-  dplyr::rename_with(~ paste0(.x, "_p3"), c(delta, gamma, vega, theta, rho, price))
+P1_greeks_jump <- get_cd_greeks(port_jump$K[1], port_jump$T2M[1], r, 0, port_jump$sigma[1], type = port_jump$type[1], step = delta_step, range = c(50, 100)) %>%
+  dplyr::rename_with(~ paste0(.x, "_p1"), c(delta, gamma, vega, theta, price))
+P2_greeks_jump <- get_cd_greeks(port_jump$K[2], port_jump$T2M[2], r, 0, port_jump$sigma[2], type = port_jump$type[2], step = delta_step, range = c(50, 100)) %>%
+  dplyr::rename_with(~ paste0(.x, "_p2"), c(delta, gamma, vega, theta, price))
+P3_greeks_jump <- get_cd_greeks(port_jump$K[3], port_jump$T2M[3], r, 0, port_jump$sigma[3], type = port_jump$type[3], step = delta_step, range = c(50, 100)) %>%
+  dplyr::rename_with(~ paste0(.x, "_p3"), c(delta, gamma, vega, theta, price))
 
 greeks__full_table_jump <- P1_greeks_jump %>%
   dplyr::left_join(., P2_greeks_jump, join_by(S)) %>%
@@ -471,8 +509,7 @@ portfolio_greeks_jump <- greeks__full_table_jump %>%
                 P_gamma = (port$n[1] * gamma_p1) + (port$n[2] * gamma_p2) + (port$n[3] * gamma_p3),
                 P_vega = (port$n[1] * vega_p1) + (port$n[2] * vega_p2) + (port$n[3] * vega_p3),
                 P_theta = (port$n[1] * theta_p1) + (port$n[2] * theta_p2) + (port$n[3] * theta_p3),
-                P_Price = (port$n[1] * price_p1) + (port$n[2] * price_p2) + (port$n[3] * price_p3)) %>%
-  dplyr::select(S, contains("P", ignore.case = FALSE))
+                P_Price = (port$n[1] * price_p1) + (port$n[2] * price_p2) + (port$n[3] * price_p3))
 
 pnl_jump <- portfolio_greeks_jump %>%
   dplyr::mutate(delta_pnl = mult * P_delta,
@@ -481,8 +518,8 @@ pnl_jump <- portfolio_greeks_jump %>%
                 theta_pnl = mult * P_theta,
                 total_pnl = mult * P_Price)
 
-# Finding vanna of the ORIGINAL portfolio, at the original price. 
 
+# Finding vanna of the ORIGINAL portfolio, at the original price. 
 find_vanna <- function(F_0, delta_F, K, T2M, r, sigma, vol_jump, type) {
   
   up_up <- RTL::GBSOption(F_0 + delta_F, K, T2M, r, 0, sigma + vol_jump, type = type)$price
@@ -508,37 +545,87 @@ P3_va_curr <- find_vanna(F_0, delta_F, port$K[3], port$T2M[3], r, port$sigma[3],
 # Portfolio
 
 P_vanna <- (P1_va_curr * port$n[1]) + (P2_va_curr * port$n[2]) + (P3_va_curr * port$n[3])
-
+# THIS VANNA IS ONLY FOR F_0 --- DONT USE IT ANYWHERE ELSE OR ITLL BE FUCKED UP
 
 
 # -----------------------------------------------------------------------------------------------------------------------------------------
 
-# Actual P&L
-value_jump <- pnl_jump %>%
-  dplyr::filter(S == F_1) %>%
-  dplyr::select(total_pnl) %>%
-  dplyr::pull()
+# Individual PNL change:
+# Use Pnl_jump df, subtract value from Pnl df from that to find jump
 
-value_pre <- pnl %>%
+# P1 - Prices pre and post shift, multiplied by exposure and number of contracts
+P1_pre <- pnl %>%
   dplyr::filter(S == F_0) %>%
-  dplyr::select(total_pnl) %>%
-  dplyr::pull()
+  dplyr::select(price_p1) %>%
+  dplyr::pull() * mult * port$n[1]
 
-# Values are already multiplied by n and mult, see above. (Hello Phil if you're reading this)
-change_pnl <- value_jump - value_pre
-
-# Greeks value attribution !!
-# pray the change i find here is the change_pnl from above :>
-
-implied_change_pnl <- pnl %>%
+P1_post <- pnl_jump %>%
   dplyr::filter(S == F_1) %>%
-  dplyr::mutate(expected_change = (delta_pnl * delta_F) + (0.5 * gamma_pnl * delta_F^2) + (vega_pnl * 100 * vol_jump) + (P_vanna * delta_F * vol_jump * mult) + (theta_pnl * delta_t)) %>%
-  dplyr::select(expected_change) %>%
-  dplyr::pull()
+  dplyr::select(price_p1) %>%
+  dplyr::pull() * mult * port$n[1]
 
-# Overestimation of change
-difference <- change_pnl - implied_change_pnl
+P1_shift <- P1_post - P1_pre
 
+# P2 - Prices pre and post shift, multiplied by exposure and number of contracts
+P2_pre <- pnl %>%
+  dplyr::filter(S == F_0) %>%
+  dplyr::select(price_p2) %>%
+  dplyr::pull() * mult * port$n[2]
+
+P2_post <- pnl_jump %>%
+  dplyr::filter(S == F_1) %>%
+  dplyr::select(price_p2) %>%
+  dplyr::pull() * mult * port$n[2]
+
+P2_shift <- P2_post - P2_pre
+
+# P3 - Prices pre and post shift, multiplied by exposure and number of contracts
+P3_pre <- pnl %>%
+  dplyr::filter(S == F_0) %>%
+  dplyr::select(price_p3) %>%
+  dplyr::pull() * mult * port$n[3]
+
+P3_post <- pnl_jump %>%
+  dplyr::filter(S == F_1) %>%
+  dplyr::select(price_p3) %>%
+  dplyr::pull() * mult * port$n[3]
+
+P3_shift <- P3_post - P3_pre
+
+Actual_pnl <- sum(P1_shift, P2_shift, P3_shift)
+# ---------------------------------------------
+
+# Attributed Pnl
+# Using original PNL values from the pnl df
+
+Attributed_pnl <- pnl %>%
+  dplyr::filter(S == F_0) %>%
+  dplyr::select(P_delta, P_gamma, P_vega, P_theta, total_pnl) %>%
+  dplyr::mutate(Attributed_pnl = mult * ((P_delta * delta_F) + (P_gamma * 0.5 * delta_F^2) + (P_vega * vol_jump) + (P_vanna * delta_F * vol_jump) + (P_theta * delta_t))) %>%
+  dplyr::pull(Attributed_pnl)
+
+# Percentage breakdown for each greek
+
+pnl_F_0 <- pnl %>%
+  dplyr::filter(S == F_0) %>%
+  dplyr::mutate(P_vanna = P_vanna)
+
+delta_contribution <- mult * (pnl_F_0$P_delta * delta_F)
+gamma_contribution <- mult * (pnl_F_0$P_gamma * 0.5 * delta_F^2)
+vega_contribution <- mult * (pnl_F_0$P_vega * vol_jump)
+vanna_contribution <- mult * (pnl_F_0$P_vanna * delta_F * vol_jump)
+theta_contribution <- mult * (pnl_F_0$P_theta * delta_t)
+
+delta_attributed_pnl <- delta_contribution / Attributed_pnl
+gamma_attributed_pnl <- gamma_contribution / Attributed_pnl
+vega_attributed_pnl <- vega_contribution / Attributed_pnl
+vanna_attributed_pnl <- vanna_contribution / Attributed_pnl
+theta_attributed_pnl <- theta_contribution / Attributed_pnl
+
+
+
+# Unexplained Pnl
+Unexplained_pnl <- Actual_pnl - Attributed_pnl
 ```
 
 # Question 4 (4 points)
