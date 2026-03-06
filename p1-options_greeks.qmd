@@ -27,6 +27,7 @@ library(gt)
 library(RTL)
 library(gridExtra)
 library(patchwork)
+library(plotly)
 
 F_0  <- 73.00
 r    <- 0.04
@@ -449,6 +450,36 @@ max_gamma <- portfolio$S[portfolio$Port_gamma_n == max(portfolio$Port_gamma_n)]
 min_gamma <- portfolio$S[portfolio$Port_gamma_n == min(portfolio$Port_gamma_n)]
 ```
 
+```{r, q1 out MTM, include = FALSE, echo = FALSE} 
+
+MTM_plot
+
+```
+```{r, q1 out greeks, include = FALSE, echo = FALSE}
+
+greeks_plot
+
+```
+## Question 1 Answers:
+
+Question: What \[does\] the MTM profile shape reveals about the portfolio's net directionality and curvature?
+
+Answer: The Mark-to-market shape shows that the firm is extremely bearish on CL. Their combined position indicates a market view of a predicted drop in price, with very little margin for any rally in price. The curvature (delta, and gamma) of the portfolio indicate that the firm is net short on both delta and gamma. Their portfolio gamma over the range of \$50 - \$100 varies slightly, reaching a local maximum at \$64.97, and conversely is at a minimum at \$50. Additionally, because portfolio gamma has both changes in slope, as well as curvature, its clear that Speed would play a large part in unexplained PnL over the range. Portfolio delta has a similar story, being negative entirely throughout the range - reaching a local maximum at \$50, and a local minimum at \$100.
+
+--------------------------------------------------------------------------------
+
+Question: Where [is] portfolio Gamma [...] highest and lowest across the price range, and why those regions correspond to specific positions.
+
+Answer: Portfolio gamma is minimized at the futures price of \$50, and maximized at a futures price of \$64.97. The minimum point of gamma is dominated by P2, the short put with strike price of \$55. This is mainly becuase gamma for both of the other positions is near-zero in comparison, leading to P2 making up the majority of the portfolio gamma at that point. Additionall, gamma for that particular position (P2) steadily decreases (increases for long position) throughout the range, reaching a minimum at the same point as portfolio gamma. The maximum for gamma is dominated by the firms position in P1, their long put with strike of \$70. P1 spikes sharply between futures price of ~\$57 and ~\$78, causing gamma within the portfolio to rise sharply as well.
+
+--------------------------------------------------------------------------------
+
+Question: What [does] the changing Gamma means for a delta-hedger rebalancing daily as WTI moves through the \$50–\$100 range?
+
+Answer: For a delta-hedger, the sweeping changes in gamma exposure over the range of futures prices, even between \$73 +/- \$5 would be extremely detrimental. The portfolio would likely require multiple re-hedges a day, and the transaction costs alone for those hedging adjustments would likely eat a decent chunk of short-term profit. 
+
+--------------------------------------------------------------------------------
+
 # Question 2 (3 points)
 
 Sum Greeks across positions to show **portfolio-level Greeks** at the current market. Present in a `gt::gt()` table. At approximately what futures price does the portfolio delta change sign?
@@ -464,10 +495,15 @@ dplyr::tribble(
   "P3", q2$P3_delta_n, q2$P3_gamma_n, q2$P3_vega_n, q2$P3_theta_n, q2$P3_vanna_n, sum(q2$P3_delta_n, q2$P3_gamma_n, q2$P3_vega_n, q2$P3_theta_n, q2$P3_vanna_n),
   "Portfolio", q2$Port_delta_n, q2$Port_gamma_n, q2$Port_vega_n, q2$Port_theta_n, q2$Port_vanna_n, sum(q2$Port_delta_n, q2$Port_gamma_n, q2$Port_vega_n, q2$Port_theta_n, q2$Port_vanna_n)) %>%
   gt::gt() %>%
+  gt::fmt_number(suffixing = TRUE, accounting = TRUE) %>%
   gt::tab_header(title = "Positional, and Portfolio Greeks.")
-
-# Delta sign change
 ```
+
+Question: At approximately what futures price does the portfolio delta change sign?
+
+Answer: Looking at the chart, and after drawing out the payoff for the combined portfolio, it seems as though delta would never be positive. However, it approaches zero when the underlying futures price approaches zero. That being said, it does come incredibly close to zero at a value of approximately $17
+
+--------------------------------------------------------------------------------
 
 # Question 3 (8 points)
 
@@ -586,8 +622,21 @@ dplyr::tribble(
   "P3 num.", a$P3_delta_move, a$P3_gamma_move, a$P3_vega_move, a$P3_vanna_move, a$P3_theta_move, a$P3_total_move / a$total_move * 100,
   "Portfolio (%)", a$delta_move / a$total_move * 100, a$gamma_move / a$total_move * 100, a$vega_move / a$total_move * 100, a$vanna_move / a$total_move * 100, a$theta_move / a$total_move * 100, 100L
 ) %>% gt::gt() %>%
+  gt::fmt_number(suffixing = TRUE, accounting = TRUE) %>%
   gt::tab_header(title = "Portfolio Attribution Properties")
 ```
+
+Question: Which position dominates the loss?
+
+Answer: Through delta, P1 and P3 carry the attributions. Both reaching extremely negative numbers, causing PnL to drop sharply. However, generally in the portfolio P3, the firms short call dominates losses. From the table above, P3 leads >100% of the losses for the portfolio. With the other two positions clawing back some value. Heuristically, this makes sense. Because P3 is a short call, as price rises (especially sharply) the firm would be exposed to increasing losses. 
+
+--------------------------------------------------------------------------------
+
+Question: Is the Greek attribution a reliable approximation here, and why or why not?
+
+Answer: Using greeks to approximate losses works reliably within a narrow range of underlying price fluctuations. As seen above, gamma exposure changes wildly throughout the price range, leading to Speed contributing a non-negligible amount to PnL. Because our approximation of the greeks was for a futures price approximately 19% lower than current prices, everything goes out the window. Greek PnL attribution estimation works well within small shifts of underlying value, but utterly fails in high market volatility.
+
+--------------------------------------------------------------------------------
 
 # Question 4 (4 points)
 
@@ -683,7 +732,45 @@ q4_plot <- plotly::plot_ly(data = q4_pnl) %>%
     yaxis = list(title = "Pnl ($)"),
     shapes = list(vline(F_1, "red"))
   )
+
+# Question B
+# At what ΔF does the absolute residual first exceed 5% of the absolute Actual P&L
+
+q4_b <- q4_pnl %>%
+  dplyr::mutate(Unexplained_pct = abs(Unexplained_pnl) / abs(Port_pnl_act) * 100) %>%
+  dplyr::filter(Unexplained_pct > 5) %>%
+  dplyr::mutate(S = S - F_0)
 ```
+
+**A.**
+
+``` {r, q4 out pnl}
+
+q4_plot
+
+```
+
+**B.**
+```{r, q4 unexplained percentage out}
+
+q4_b %>%
+  dplyr::select(S, Unexplained_pct) %>%
+  dplyr::rename("Δ Futures Price" = S, "Unexplained PnL (% of Attribution)" = Unexplained_pct) %>%
+  gt::gt() %>%
+  gt::fmt(columns = `Unexplained PnL (% of Attribution)`, fns = function(x){paste0(round(x, 2), "%")}) %>%
+  gt::fmt(columns = `Δ Futures Price`, fns = function(x){paste0("$", x)})
+```
+Question: At what ΔF does the absolute residual first exceed 5% of the absolute Actual P&L?
+
+Answer: As evidenced above, the first value where the unexplained percentage of returns is >5% when moving through the negative ΔF is \$60, or when ΔF = -\$13. Additionally, the value at which unexplained percentage of returns is >5% when moving through positive ΔF is $90, or when ΔF = \$17.
+
+--------------------------------------------------------------------------------
+
+Question: What does this tell you about using Greeks for risk management in extreme scenarios?
+
+Answer: This increase in unexplained PnL steadily grows as the spot price drifts from the starting value. Critically, this steady increase in forecast error for PnL attribution can lead to improper hedging, and improper risk management. Large market value swings of assets are not uncommon, and relying on increasingly inaccurate metrics to assess exposure and risk reduce a portfolio managers ability to properly assess the landscape around them. Using Phil's examples of a dashboard in a car, if your greeks (gauges) get less accurate as you decrease or increase speed, you would be likely to end up in an accident.
+
+--------------------------------------------------------------------------------
 
 # Question 5 (6 points)
 
