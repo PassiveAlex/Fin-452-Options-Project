@@ -20,7 +20,7 @@ editor: source
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = FALSE)
 options(scipen = 999)
 library(tidyverse)
 library(gt)
