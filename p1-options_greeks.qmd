@@ -91,6 +91,26 @@ For **each position**, compute the following Greeks **numerically** using centra
 
 **Step size selection**: For each Greek, choose an appropriate finite-difference step size and explain your reasoning. A good step is small enough that the finite difference accurately approximates the true derivative, but not so small that floating-point subtraction errors dominate. Consider the natural scale of each risk factor (price in \$/bbl, vol as a decimal, time in years) and any special considerations for the short-dated options in this portfolio.
 
+```{r, step sizes, echo = FALSE}
+
+dplyr::tribble(
+  ~ Greek, ~ `Step Size`,
+  "Delta", "0.01",
+  "Vega", "0.01",
+  "Theta", "1/365"
+) %>%
+  gt::gt() 
+
+```
+
+Logic:
+
+For delta I selected a step size of 0.01, as the minimum move in the underlying futures price is the same. I felt this step was small, but reasonable as selecting a larger size would lead to skipping possible values for the underlying.
+
+For vega I chose a step size of 0.01, representing a 1% change in implied volatility of the contract. This step size felt small but not granular. Using a step size smaller than 0.01 would likely have caused more errors from floating point arithmetic, leading to a less accurate attribution later down the line.
+
+For theta I decided on using a step size of 1 day. While that seems like quite a large jump, measuring theta with inter-day considerations of cahnge is not realistic or material. Using a smaller step size for theta would have likely increased the number of floating point errors introduced into the program.
+
 **Dollar scaling**: Each raw numerical derivative gives the option price change **per barrel** for a unit move in the risk factor. To express the Greek as a total dollar P&L impact for a position, multiply by `n × mult`, where `n` is the signed contract count (positive = long, negative = short) and `mult = 1,000 bbl/contract`. For example, a delta of 0.50/bbl for a 3,000-contract long position means the desk gains or loses 0.50 × 3,000 × 1,000 = \$1,500,000 per \$1/bbl move in WTI.
 
 Create plots showing each Greek vs. futures price over F ∈ \[50, 100\], with one line per position.
@@ -450,12 +470,12 @@ max_gamma <- portfolio$S[portfolio$Port_gamma_n == max(portfolio$Port_gamma_n)]
 min_gamma <- portfolio$S[portfolio$Port_gamma_n == min(portfolio$Port_gamma_n)]
 ```
 
-```{r, q1 out MTM, include = FALSE, echo = FALSE} 
+```{r, q1 out MTM, echo = FALSE} 
 
 MTM_plot
 
 ```
-```{r, q1 out greeks, include = FALSE, echo = FALSE}
+```{r, q1 out greeks, echo = FALSE}
 
 greeks_plot
 
@@ -785,3 +805,43 @@ Discuss the key learnings and insights from a Greek risk management perspective.
 Pay particular attention to why textbook delta-hedging assumptions break down in geopolitical gap scenarios, and what risk tools a real energy desk would use instead.
 
 *Your answer here.*
+
+### MTM Profile, Analysis of Gamma
+
+Throughout the range of futures prices for simulation the mark-to-market value of the portfolio varies wildly. Hitting a local maximum at \$50, and a minimum at \$100. The slope (delta) and convexity (gamma) are both negative throughout the entire range. This leads to a downward sloping, concave down looking graph. This MTM profile is a smoothed version of a simple payoff at maturity plot of the portfolio, indicating a bearish market-view on future oil prices.  
+
+Gamma reaches a maximum at an underlying futures price of \$64.97, and a minimum at underlying futures price of \$50. The large swings and unpredictability of gamma would pose a large problem for traders on an option desk. Because the steep slope of gamma (speed) around the current spot price the overall portfolio would likely require multiple re-hedges a day to keep either delta, or gamma neutral. This requirement for frequent re-hedging introduces a large degree of friction to the position, eating up profits in transaction fees, and requiring more actions than other, less gamma sensitive portfolios. 
+
+### Revaluation P&L, Gamma Profiles
+
+The portfolios curvature along the range of spot prices is that of negative slope, and negative convexity. With delta remaining negative from \$50 to \$100, and gamma following a similar trend. At portfolio gammas maximum (least negative), the gamma level is driven primarily by P1. Because P1's gamma remains positive throughout the range, it has a strong influence over the shape of the overall portfolio gamma curve. When gamma is at its minimum (most negative), the value can be attributed nearly entirely to P2. Because P2 is a short call, once the spot price drops below its strike, the position starts to incur heavy losses. Overall, a large portion of the "up" swings in gamma can be chalked up to P1's violent gamma swings, and the "down" swings in gamma are either attributed to P3 when spot is high, and P2 when spot is below the strike price of P2.
+
+### Iran war scenario
+
+When the simulated shift in price and volatility happen, three greeks lead the decline in portfolio value. Delta, which accounted for 70% of the loss, gamma making up 11% of the movement, and vanna, leading 13% of the decline. These movements in value can be mostly nearly entirely attributed to P3, the firms short call position with a strike of \$80. This heuristically makes sense from an textbook standpoint, because as price increase, the payoff at maturity for a short call position declines linearly. Additionally, because the other two positions were puts with strikes well below the shifted price of \$90, the value of those positions become negligible in comparison to the short call. As the price of the underlying becomes more out of the money (OTM) for the puts, the value declines.  
+
+### Vanna
+
+Vanna represents a cross-sensitivity between both underlying price and volatility. On a portfolio level, vanna becomes increasingly more prominent within the PnL attribution framework as both of those values vary, particularly when they vary strongly together in the same direction. In the situation with the Iran war, both volatility and futures price rise sharply; leading to an extreme increase in the weight of vanna within the attribution.  
+
+### Greek approximation
+
+Using greeks to approximate portfolio moves works well with low volatility assets. However, when large price or volatility swings happen, the higher order greeks play a larger role in the attribution of PnL. A real trading desk would likely use a larger variety of greeks to more accurately simulate swings in value and volatility. Including speed, rho, and charm within a PnL attribution framework would increase validity of the model, as well as reduce error when estimating PnL changes through changing input variables. If a firm were to run this portfolio on their books, they'd need a comprehensive hedging and re-hedging strategy that both minimizes unwanted exposure to higher order greeks, as well as reduce overall transaction costs for the portfolio.
+
+### Lessons Learned
+
+Throughout the course of this project I learned a lot of new tricks, and enhanced my mental model of options pricing. Before I started this project, I didn't have a tangible grasp on exactly how all the greeks interacted, and how small changes in spot price can swing values so violently. 
+
+I spent a lot of time going back over previously completed work as I talked to classmates about the requirements, and began to understand more of what I was measuring with a lot of the greeks and other metrics. I ended up entirely rewriting large sections of the project, completely scrapping what I had before and giving everything a fresh try with an improved understanding of my goals.
+
+While I think I did a decent job of correctly implementing functions to measure greeks, I also feel I have more questions now about the math behind each of the greeks and their interactions and attributions. There are definitly some errors in logic, or incorrect calculations (particularly during the PnL attribution section) throughout my project.
+
+I don't think I truly understood the depth and amount of time required to finish this project before I started. Going in, I felt like I had a firm grasp on all the greeks, and their interactions. However, shortly after starting, I realized I had a large gap in my knowledge between textbook understanding, and practical application. 
+
+This project definitely sharpened my R skills, and opened my eyes to a wide world of solutions and mental models for completing the tasks given.
+
+### Final Note
+
+I really appreciate the time you put into making this project, and how everything is applicable to the world as it stands now. I find a lot of professors reuse old "toy" examples a lot for students that never allow them to make the connection between textbook and real life. However, with this project I think you really nailed it. It's interesting, difficult, and requires a great deal of learning beyond the notes we were given. It balances simplicity in assumptions with complexity in requirements very well, and I found the project fair, and very interesting.
+
+Thanks Phil!
